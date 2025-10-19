@@ -1,0 +1,90 @@
+    *** Begin Patch
+    *** Update File: src/main/java/com/kaiburr/task1/service/TaskService.java
+    @@
+     import java.util.List;
+     import java.util.Optional;
++    import io.fabric8.kubernetes.api.model.Pod;
++    import io.fabric8.kubernetes.api.model.PodBuilder;
++    import io.fabric8.kubernetes.client.Config;
++    import io.fabric8.kubernetes.client.DefaultKubernetesClient;
++    import io.fabric8.kubernetes.client.KubernetesClient;
+     @Service
+     public class TaskService {
+    @@
+         public Task execute(String id) throws Exception {
+-        Optional<Task> t = taskRepository.findById(id);
+-        Task task = t.orElseThrow();
+-        TaskExecution exec = new TaskExecution();
+-        exec.setStartTime(Instant.now());
+-        // run local OS command
+-        ProcessBuilder pb = new ProcessBuilder(osCommand(task.getCommand()));
+-        Process p = pb.start();
+-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+-            String line;
+-            StringBuilder out = new StringBuilder();
+-            while ((line = reader.readLine()) != null) {
+-                out.append(line).append('\n');
+-            }
+-            p.waitFor();
+-            exec.setEndTime(Instant.now());
+-            exec.setOutput(out.toString());
+-        }
+-        task.getTaskExecutions().add(exec);
+-        return taskRepository.save(task);
++        Optional<Task> t = taskRepository.findById(id);
++        Task task = t.orElseThrow();
++        TaskExecution exec = new TaskExecution();
++        exec.setStartTime(Instant.now());
++
++        // Create a Kubernetes pod dynamically to run the command (busybox)
++        String namespace = System.getenv().getOrDefault("KUBERNETES_NAMESPACE", "default");
++        Config config = Config.autoConfigure(null);
++        try (KubernetesClient client = new DefaultKubernetesClient(config)) {
++            String podName = "task-runner-" + java.util.UUID.randomUUID().toString().substring(0,5);
++            Pod pod = new PodBuilder()
++                    .withNewMetadata()
++                        .withName(podName)
++                        .withNamespace(namespace)
++                    .endMetadata()
++                    .withNewSpec()
++                        .addNewContainer()
++                            .withName("runner")
++                            .withImage("busybox:1.36")
++                            .withCommand("/bin/sh", "-c", task.getCommand())
++                        .endContainer()
++                        .withRestartPolicy("Never")
++                    .endSpec()
++                    .build();
++
++            client.pods().inNamespace(namespace).create(pod);
++
++            // wait for pod to finish (simple loop)
++            int attempts = 0;
++            String logs = "";
++            while (attempts < 60) {
++                Pod p = client.pods().inNamespace(namespace).withName(podName).get();
++                if (p == null) {
++                    Thread.sleep(1000);
++                    attempts++;
++                    continue;
++                }
++                String phase = p.getStatus().getPhase();
++                if ("Succeeded".equalsIgnoreCase(phase) || "Failed".equalsIgnoreCase(phase)) {
++                    logs = client.pods().inNamespace(namespace).withName(podName).getLog();
++                    break;
++                }
++                Thread.sleep(1000);
++                attempts++;
++            }
++
++            exec.setEndTime(Instant.now());
++            exec.setOutput(logs);
++
++            // cleanup pod
++            client.pods().inNamespace(namespace).withName(podName).delete();
++        }
++
++        task.getTaskExecutions().add(exec);
++        return taskRepository.save(task);
+     }
+    ***

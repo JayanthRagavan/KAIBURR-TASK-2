@@ -1,0 +1,6 @@
+<!-- Add to <dependencies> in pom.xml -->
+<dependency>
+  <groupId>io.fabric8</groupId>
+  <artifactId>kubernetes-client</artifactId>
+  <version>7.6.0</version>
+</dependency>
